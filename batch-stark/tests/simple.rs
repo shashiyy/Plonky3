@@ -2269,6 +2269,76 @@ fn test_batch_stark_failed_global_lookup_inner() {
     verify_batch(&config, &airs, &proof, &pvs, common).unwrap();
 }
 
+// Contract test for deterministic ordering of global-lookup failures.
+//
+// Three global lookup names — "aaa_fail", "middle_fail", "zzz_fail" — are all
+// unbalanced. The names are intentionally registered in an order that does
+// *not* match their lexicographic order (MulAir registers "zzz_fail" before
+// "aaa_fail"), so insertion-order iteration would surface "zzz_fail" first.
+// The verifier aggregates global lookups in a BTreeMap keyed by name and
+// short-circuits on the first failure, so the reported name is the
+// lexicographically smallest one ("aaa_fail"), regardless of registration
+// order or hasher state.
+//
+// Only run in release mode: under debug_assertions the prover invokes
+// `check_lookups`, which panics earlier with a different message.
+#[cfg(not(debug_assertions))]
+#[test]
+#[should_panic(expected = "LookupError(\"GlobalCumulativeMismatch(None): aaa_fail\")")]
+fn test_batch_stark_failed_global_lookup_order_deterministic() {
+    test_batch_stark_failed_global_lookup_order_deterministic_inner();
+}
+
+#[cfg(not(debug_assertions))]
+fn test_batch_stark_failed_global_lookup_order_deterministic_inner() {
+    let config = make_config(2025);
+
+    let reps = 2;
+    let mul_air = MulAir { reps };
+    // Register "zzz_fail" before "aaa_fail" so insertion order disagrees with
+    // lexicographic order.
+    let mul_air_lookups = MulAirLookups::new(
+        mul_air,
+        false,
+        true,
+        0,
+        vec!["zzz_fail".to_string(), "aaa_fail".to_string()],
+    );
+
+    let log_n = 3;
+    let n = 1 << log_n;
+    let fibonacci_air = FibonacciAir {
+        log_height: log_n,
+        tamper_index: None,
+    };
+    // FibAir receives a third name that nobody sends, so all three global
+    // lookups are unbalanced.
+    let fib_air_lookups =
+        FibAirLookups::new(fibonacci_air, true, 0, Some(("middle_fail".to_string(), 2)));
+
+    let mul_trace = mul_trace::<Val>(n, 2);
+    let fib_trace = fib_trace::<Val>(0, 1, n);
+    let fib_pis = vec![Val::from_u64(0), Val::from_u64(1), Val::from_u64(fib_n(n))];
+    let traces = [&mul_trace, &fib_trace];
+    let pvs = vec![vec![], fib_pis];
+
+    let air1 = DemoAirWithLookups::MulLookups(mul_air_lookups);
+    let air2 = DemoAirWithLookups::FibLookups(fib_air_lookups);
+
+    let mut airs = [air1, air2];
+    let prover_data =
+        ProverData::<MyConfig>::from_airs_and_degrees(&config, &mut airs, &[log_n, log_n]);
+    let common = &prover_data.common;
+
+    let instances = StarkInstance::new_multiple(&airs, &traces, &pvs, common);
+
+    let proof = prove_batch(&config, &instances, &prover_data);
+
+    // All three names ("aaa_fail", "middle_fail", "zzz_fail") fail the global
+    // cumulative check. The verifier must report "aaa_fail" first.
+    verify_batch(&config, &airs, &proof, &pvs, common).unwrap();
+}
+
 #[test]
 fn test_batch_stark_rejects_truncated_global_lookup_data() {
     let config = make_config(2025);
